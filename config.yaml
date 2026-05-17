@@ -1,0 +1,101 @@
+data:
+  start_date: "2024-03-20"
+  end_date: "2024-04-20"
+  cache_path: "data/statcast_cache.parquet"
+
+features:
+  # EP(エフス)は全体24件しかなく予測対象として無意味なため除外
+  pitch_types: [FF, SI, SL, CH, CU, FC, FS, ST, KC]
+  cols:
+    # ── カウント・ゲーム状況 ──────────────────────────
+    - balls
+    - strikes
+    - outs_when_up
+    - inning
+    - pitch_number
+    - count_pressure          # balls - strikes
+    - two_strikes             # 2ストライクフラグ
+    - full_count              # フルカウントフラグ
+    - first_pitch             # 初球フラグ
+    - early_inning            # 1〜3回
+    - late_inning             # 7回以降
+    # ── 走者・スコア ─────────────────────────────────
+    - on_1b
+    - on_2b
+    - on_3b
+    - runners_on_base         # 走者総数(0-3)
+    - score_diff              # 得点差（攻撃チーム視点）
+    - leverage_proxy          # ゲーム圧力代理変数
+    # ── 投打マッチアップ ──────────────────────────────
+    - stand
+    - p_throws
+    # 投手の球種比率（pitcher_encの代替: 年をまたいでも意味が変わらない）
+    - pitcher_ff_pct
+    - pitcher_si_pct
+    - pitcher_sl_pct
+    - pitcher_ch_pct
+    - pitcher_cu_pct
+    - pitcher_fc_pct
+    - pitcher_fs_pct
+    - pitcher_st_pct
+    - pitcher_kc_pct
+    # ── 疲労・対戦回数 ───────────────────────────────
+    - pitch_count_game        # 投手のゲーム内累積投球数
+    - pa_count_game           # 打者のゲーム内累積打席数
+    - batter_seen_pitcher     # 打者が今日この投手と対戦済みか
+    # ── 直前3球の球種シーケンス ──────────────────────
+    - prev_pitch_type
+    - prev2_pitch_type
+    - prev3_pitch_type
+    # ── 直前球の物理量 ────────────────────────────────
+    - prev_release_speed
+    - prev_release_spin_rate
+    - prev_pfx_x
+    - prev_pfx_z
+    - prev_plate_x
+    - prev_plate_z
+    # ── 投手の直近フォーム（ローリング平均） ─────────
+    - rolling_release_speed
+    - rolling_spin_rate
+
+# 時系列分割 (ランダム分割によるデータリーク防止)
+# 同一試合・同一投手が train/test に混在しないよう game_date 基準で前後を分ける
+split:
+  test_ratio: 0.10
+  val_ratio: 0.10
+
+model:
+  n_estimators: 800
+  max_depth: 6
+  learning_rate: 0.05
+  subsample: 0.8
+  colsample_bytree: 0.8
+
+output:
+  model_dir: "models"
+  model_name: "xgb_pitch_pred.joblib"
+
+# ── Hybrid LSTM 設定 ──────────────────────────────────────────────────────────
+# --mode hybrid で使用
+hybrid:
+  lstm_hidden: 128   # LSTM隠れ層サイズ (64→128 に拡張)
+  num_layers: 2      # LSTMの積み重ね数
+  dropout: 0.3
+  batch_size: 512
+  lr: 0.001
+  epochs: 25
+  model_name: "hybrid_lstm.pt"
+
+# ── CatBoost 設定 ─────────────────────────────────────────────────────────────
+# --mode ensemble で XGBoost の並列ベースモデルとして使用
+catboost:
+  iterations: 800
+  depth: 6
+  learning_rate: 0.05
+  l2_leaf_reg: 3
+
+# ── Ensemble Stack 設定 ───────────────────────────────────────────────────────
+# --mode ensemble: XGBoost + CatBoost + Hybrid LSTM → LogisticRegression メタ学習
+ensemble:
+  meta_C: 0.5        # メタ学習器の正則化強度 (小さいほど強正則化)
+  model_name: "ensemble_stack.joblib"
