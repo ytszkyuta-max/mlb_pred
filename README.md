@@ -1,122 +1,124 @@
 # mlb_pred — MLB Pitch Type Predictor
 
-**次の球種を予測するMLBデータ駆動型AI。Statcastデータ×アンサンブル学習で9球種を43.85%の精度で予測する。**
+**A data-driven AI that predicts the next pitch type in MLB. Achieves 43.85% accuracy across 9 pitch types using Statcast data and ensemble learning.**
 
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
----
-
-## 概要
-
-MLB Statcast データを使い、投球前の**試合状況だけ**から次の球種を予測する多クラス分類モデル。
-
-- 予測対象: FF / SI / SL / CH / CU / FC / FS / ST / KC の **9球種**
-- 精度: **43.85%**（ランダム比較 ~11%、約4倍）
-- 特徴: 投球後にしか得られない物理量（球速・変化量）は意図的に除外し、真の「事前予測」を実現
-
-```
-試合状況（カウント・ランナー・直前球種・投手IDなど）
-    ↓
-XGBoost + CatBoost スタッキング
-    ↓
-次の球種を確率付きで予測
-```
+[日本語版 README はこちら](README.ja.md)
 
 ---
 
-## 精度
+## Overview
 
-| モデル | テスト精度 |
+A multi-class classification model that predicts the next pitch type using **only pre-pitch game situation data** from MLB Statcast.
+
+- Predicts: FF / SI / SL / CH / CU / FC / FS / ST / KC (**9 pitch types**)
+- Accuracy: **43.85%** (vs. random baseline ~11% — approximately 4×)
+- Key design: Post-pitch physics (velocity, movement) are intentionally excluded to ensure true pre-pitch prediction
+
+```
+Game situation (count, runners, previous pitch, pitcher ID, ...)
+    ↓
+XGBoost + CatBoost stacking
+    ↓
+Next pitch type with probability estimates
+```
+
+---
+
+## Results
+
+| Model | Test Accuracy |
 |---|---|
-| XGBoost 単体 | 36.10% |
-| CatBoost 単体 | 36.65% |
-| **Ensemble Stack（XGB + CatBoost + Logistic Regression）** | **43.85%** |
+| XGBoost (standalone) | 36.10% |
+| CatBoost (standalone) | 36.65% |
+| **Ensemble Stack (XGB + CatBoost + Logistic Regression)** | **43.85%** |
 
-ランダムベースライン ~11%（9クラス均等）に対して約4倍。
+~4× better than a random baseline of ~11% (9-class uniform).
 
 ---
 
 ## Quick Start
 
 ```bash
-# 依存ライブラリのインストール
+# Install dependencies
 pip install -r requirements.txt
 
-# XGBoostモデルで学習・評価
+# Train and evaluate with XGBoost
 python3 main.py --mode xgb
 
-# アンサンブルモデル（推奨）
+# Train and evaluate with ensemble (recommended)
 python3 main.py --mode ensemble
 
-# ブラウザで対話予測UI
+# Launch interactive prediction UI
 streamlit run app.py
 ```
 
 ---
 
-## 使用特徴量
+## Features
 
-投球「前」に得られる情報のみを使用。
+Only information available **before** the pitch is used.
 
-| カテゴリ | 特徴量 |
+| Category | Features |
 |---|---|
-| カウント | balls, strikes, outs_when_up, inning |
-| 打者/投手属性 | stand（打席方向）, p_throws（投球腕）, pitcher_enc |
-| ランナー状況 | on_1b, on_2b, on_3b |
-| ラグ特徴量 | prev_pitch_type（直前球種）, prev_release_speed（直前球速） |
+| Count | balls, strikes, outs_when_up, inning |
+| Batter / Pitcher | stand (batter side), p_throws (pitcher arm), pitcher_enc |
+| Runner situation | on_1b, on_2b, on_3b |
+| Lag features | prev_pitch_type, prev_release_speed |
 
-> `release_speed`, `pfx_x/z` などの物理量は除外済み（投球後情報のためリーク扱い）。
+> `release_speed`, `pfx_x/z`, and other post-pitch physics are excluded to prevent data leakage.
 
 ---
 
-## アーキテクチャ
+## Architecture
 
 ```
-pybaseball（Statcast API）
-    ↓ データ取得・キャッシュ（parquet）
-特徴量エンジニアリング
-    ├─ 投手エンコーディング（LabelEncoder）
-    ├─ ラグ特徴量（shift(1) by game_pk × at_bat_number）
-    └─ 時系列分割（train 80% / val 10% / test 10%）
+pybaseball (Statcast API)
+    ↓ Data fetching + caching (parquet)
+Feature engineering
+    ├─ Pitcher encoding (LabelEncoder)
+    ├─ Lag features (shift(1) by game_pk × at_bat_number)
+    └─ Time-series split (train 80% / val 10% / test 10%)
         ↓
     XGBoost ────┐
-    CatBoost ───┤ → メタ学習器（Logistic Regression）→ 最終予測
+    CatBoost ───┤ → Meta-learner (Logistic Regression) → Final prediction
 ```
 
 ---
 
-## ディレクトリ構成
+## Project Structure
 
 ```
 mlb_pred/
-├── main.py              # エントリーポイント
-├── app.py               # Streamlit Webアプリ
-├── config.yaml          # データ期間・特徴量・モデル設定
+├── main.py              # Entry point
+├── app.py               # Streamlit web app
+├── config.yaml          # Data range, features, model settings
 ├── requirements.txt
 └── src/
-    ├── data_loader.py   # Statcastデータ取得 + parquetキャッシュ
-    ├── features.py      # 特徴量エンジニアリング
-    ├── train.py         # 時系列分割 + 学習
-    └── evaluate.py      # 精度評価 + カウント別分析
+    ├── data_loader.py   # Statcast data fetching + parquet cache
+    ├── features.py      # Feature engineering
+    ├── train.py         # Time-series split + training
+    └── evaluate.py      # Accuracy + count-based subgroup analysis
 ```
 
 ---
 
-## 今後の拡張予定
+## Roadmap
 
-- [ ] 複数シーズン（2020〜2024年）への拡張
-- [ ] コース予測（インコース/アウトコース/高低）の追加
-- [ ] NPB（日本プロ野球）版の実装
-- [ ] FastAPI による推論エンドポイント
-- [ ] Optuna によるハイパーパラメータ最適化
+- [ ] Expand to multiple seasons (2020–2024)
+- [ ] Add pitch location prediction (in/out, high/low)
+- [ ] NPB (Nippon Professional Baseball) version
+- [ ] FastAPI inference endpoint
+- [ ] Hyperparameter optimization with Optuna
 
 ---
 
-## データソース
+## Data Sources
 
-- [pybaseball](https://github.com/jldbc/pybaseball) — MLB Statcast データ取得
-- [Baseball Savant](https://baseballsavant.mlb.com/) — Statcast 公式ソース
+- [pybaseball](https://github.com/jldbc/pybaseball) — MLB Statcast data access
+- [Baseball Savant](https://baseballsavant.mlb.com/) — Official Statcast source
 
 ---
 
