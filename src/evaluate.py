@@ -92,6 +92,59 @@ def evaluate_ensemble(
     return acc, y_pred
 
 
+def model_agreement_analysis(probs_list: list, model_names: list):
+    """
+    各モデルの予測クラス一致率（相関の代理指標）を表示する。
+    一致率が高い = diversity 低い = アンサンブルに追加しても効果薄。
+    """
+    import itertools
+
+    preds = [p.argmax(axis=1) for p in probs_list]
+    print("── モデル間の予測一致率（diversity診断）──")
+    for (i, n1), (j, n2) in itertools.combinations(enumerate(model_names), 2):
+        agree = (preds[i] == preds[j]).mean()
+        print(f"  {n1} ↔ {n2}: {agree:.3f}")
+    print()
+
+
+def evaluate_temperature_scaled(scaler, raw_proba: np.ndarray, y_test: np.ndarray, le_target):
+    """
+    Temperature-scaled 確率で Log Loss / Brier Score を再評価する。
+    Accuracy は変わらないため精度表示は省略。
+    """
+    from sklearn.metrics import log_loss
+
+    scaled_proba = scaler.transform(raw_proba)
+    ll = log_loss(y_test, scaled_proba)
+
+    n_classes = scaled_proba.shape[1]
+    y_one_hot = np.eye(n_classes)[y_test]
+    brier = float(np.mean(np.sum((y_one_hot - scaled_proba) ** 2, axis=1)))
+
+    print(f"  → Temperature Scaled (T={scaler.temperature:.4f}): "
+          f"Log Loss: {ll:.4f}  |  Brier Score: {brier:.4f}")
+    return ll, brier
+
+
+def evaluate_blend(weights: list, test_probs_list: list, y_test: np.ndarray, le_target):
+    """ブレンディング（重み付き平均）でテスト精度を評価する。"""
+    weights = np.array(weights)
+    blend_proba = sum(w * p for w, p in zip(weights, test_probs_list))
+    y_pred = blend_proba.argmax(axis=1)
+    acc = accuracy_score(y_test, y_pred)
+
+    print(f"\n=== [Blend] テスト精度: {acc:.4f} ({acc*100:.2f}%) ===")
+    w_strs = ", ".join(f"{w:.3f}" for w in weights)
+    print(f"    重み配分: [{w_strs}]")
+    print()
+
+    labels = le_target.classes_
+    names = [PITCH_LABEL_MAP.get(lb, lb) for lb in labels]
+    print(classification_report(y_test, y_pred, target_names=names))
+
+    return acc, y_pred
+
+
 def evaluate_hybrid(model, ds_test, cfg_hybrid: dict, le_target, device):
     """Hybrid LSTMモデルのテスト精度を評価する。"""
     import torch

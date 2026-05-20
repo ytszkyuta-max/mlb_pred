@@ -130,6 +130,71 @@ def train_stacking(val_probs_list: list, y_val: np.ndarray, meta_C: float = 0.5)
     return meta
 
 
+class TemperatureScaler:
+    """
+    Post-hoc probability calibration via temperature scaling (Guo et al. 2017).
+    Fits a single scalar T to minimize log loss on val set.
+    softmax(log(p) / T): T>1 softens (less confident), T<1 sharpens.
+    Accuracy is unchanged; only probability estimates are corrected.
+    """
+
+    def __init__(self):
+        self.temperature = 1.0
+
+    def fit(self, proba: np.ndarray, y: np.ndarray) -> "TemperatureScaler":
+        from scipy.optimize import minimize_scalar
+        from sklearn.metrics import log_loss
+
+        def objective(T):
+            return log_loss(y, self._scale(proba, T))
+
+        result = minimize_scalar(objective, bounds=(0.05, 20.0), method="bounded")
+        self.temperature = float(result.x)
+        return self
+
+    def _scale(self, proba: np.ndarray, T: float) -> np.ndarray:
+        log_p = np.log(np.clip(proba, 1e-10, 1.0))
+        shifted = log_p / T
+        shifted -= shifted.max(axis=1, keepdims=True)
+        exp_p = np.exp(shifted)
+        return exp_p / exp_p.sum(axis=1, keepdims=True)
+
+    def transform(self, proba: np.ndarray) -> np.ndarray:
+        return self._scale(proba, self.temperature)
+
+
+def train_blend_weights(val_probs_list: list, y_val: np.ndarray, n_trials: int = 300) -> list[float]:
+    """
+    Optuna で各モデルの重みを最適化するブレンディング。
+    LogisticRegressionスタッキングよりパラメータ数が少なく過学習しにくい。
+    戻り値: 正規化済み重みリスト（len == len(val_probs_list)）
+    """
+    try:
+        import optuna
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+    except ImportError:
+        print("[blend] optuna未インストール。均等重みを使用します。")
+        n = len(val_probs_list)
+        return [1.0 / n] * n
+
+    from sklearn.metrics import accuracy_score
+
+    def objective(trial):
+        weights = np.array([trial.suggest_float(f"w{i}", 0.0, 1.0) for i in range(len(val_probs_list))])
+        if weights.sum() < 1e-9:
+            return 0.0
+        weights /= weights.sum()
+        blend = sum(w * p for w, p in zip(weights, val_probs_list))
+        return accuracy_score(y_val, blend.argmax(axis=1))
+
+    study = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=42))
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+
+    raw = np.array([study.best_params[f"w{i}"] for i in range(len(val_probs_list))])
+    raw /= raw.sum()
+    return raw.tolist()
+
+
 # ── Hybrid LSTM ────────────────────────────────────────────────────────────────
 
 def time_split_dfs(df: pd.DataFrame, test_ratio: float, val_ratio: float):

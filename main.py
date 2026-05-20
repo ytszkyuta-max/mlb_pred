@@ -9,15 +9,16 @@ from src.data_loader import load
 from src.features import engineer, encode_target
 from src.train import (
     time_split, time_split_dfs, train, train_hybrid,
-    train_catboost, catboost_proba, train_stacking,
+    train_catboost, catboost_proba, train_stacking, train_blend_weights,
+    TemperatureScaler,
 )
-from src.evaluate import evaluate, count_subgroup_analysis, evaluate_hybrid, evaluate_ensemble
+from src.evaluate import evaluate, count_subgroup_analysis, evaluate_hybrid, evaluate_ensemble, model_agreement_analysis, evaluate_blend, evaluate_temperature_scaled
 
 def main():
     parser = argparse.ArgumentParser(description="MLB投球予測AI")
     parser.add_argument(
-        "--mode", choices=["xgb", "hybrid", "ensemble"], default="hybrid",
-        help="xgb: XGBoost単体  hybrid: LSTM+全結合ハイブリッド  ensemble: XGBoost+CatBoost+LSTM スタッキング (デフォルト: hybrid)",
+        "--mode", choices=["xgb", "hybrid", "ensemble", "tft"], default="hybrid",
+        help="xgb: XGBoost単体  hybrid: LSTM+全結合ハイブリッド  ensemble: XGBoost+CatBoost+LSTM スタッキング  tft: Temporal Fusion Transformer (デフォルト: hybrid)",
     )
     args = parser.parse_args()
 
@@ -140,6 +141,73 @@ def main():
         )
         print(f"モデル保存: {save_path}")
 
+    elif args.mode == "tft":
+        # ── Temporal Fusion Transformer ───────────────────────────────────────
+        import torch
+        from src.dataset import AtBatDataset, fit_scalers, SEQ_DIM
+        from src.tft_model import TFTPitchClassifier
+
+        if torch.backends.mps.is_available():
+            device = torch.device("mps")
+        elif torch.cuda.is_available():
+            device = torch.device("cuda")
+        else:
+            device = torch.device("cpu")
+        print(f"\nDevice: {device}")
+
+        df_train, df_val, df_test = time_split_dfs(
+            df,
+            test_ratio=split_cfg["test_ratio"],
+            val_ratio=split_cfg["val_ratio"],
+        )
+        print(f"Train: {len(df_train):,}  Val: {len(df_val):,}  Test: {len(df_test):,}")
+
+        scalers = fit_scalers(df_train, feature_cols)
+        ds_train = AtBatDataset(df_train, feature_cols, le_target, scalers)
+        ds_val   = AtBatDataset(df_val,   feature_cols, le_target, scalers)
+        ds_test  = AtBatDataset(df_test,  feature_cols, le_target, scalers)
+        print(f"サンプル数 — Train: {len(ds_train):,}  Val: {len(ds_val):,}  Test: {len(ds_test):,}")
+
+        cfg_tft = cfg["tft"]
+        num_classes = len(le_target.classes_)
+        model = TFTPitchClassifier(
+            seq_dim=SEQ_DIM,
+            tab_dim=len(feature_cols),
+            num_classes=num_classes,
+            d_model=cfg_tft["d_model"],
+            num_heads=cfg_tft["num_heads"],
+            num_lstm_layers=cfg_tft["num_lstm_layers"],
+            dropout=cfg_tft["dropout"],
+        ).to(device)
+
+        print(f"\nモデルパラメータ数: {sum(p.numel() for p in model.parameters()):,}\n")
+        model = train_hybrid(ds_train, ds_val, model, cfg_tft, device)
+
+        acc, y_pred, y_test_np = evaluate_hybrid(model, ds_test, cfg_tft, le_target, device)
+        count_subgroup_analysis(df_test.reset_index(drop=True), y_test_np, y_pred)
+
+        save_path = out_dir / cfg_tft["model_name"]
+        torch.save(
+            {
+                "model_state": model.state_dict(),
+                "model_cfg": {
+                    "seq_dim": SEQ_DIM,
+                    "tab_dim": len(feature_cols),
+                    "num_classes": num_classes,
+                    "d_model": cfg_tft["d_model"],
+                    "num_heads": cfg_tft["num_heads"],
+                    "num_lstm_layers": cfg_tft["num_lstm_layers"],
+                    "dropout": cfg_tft["dropout"],
+                },
+                "le_target": le_target,
+                "le_pitcher": le_pitcher,
+                "scalers": scalers,
+                "feature_cols": feature_cols,
+            },
+            save_path,
+        )
+        print(f"モデル保存: {save_path}")
+
     else:
         # ── Ensemble Stack ────────────────────────────────────────────────────
         # XGBoost (表形式) + CatBoost (カテゴリ特化) の 2 モデルをベース学習器とし、
@@ -184,22 +252,42 @@ def main():
         print(f"  XGBoost  : {xgb_test_acc:.4f} ({xgb_test_acc*100:.2f}%)")
         print(f"  CatBoost : {cat_test_acc:.4f} ({cat_test_acc*100:.2f}%)")
 
-        # ── スタッキング ──────────────────────────────────────────────────────
-        print("\n" + "=" * 50)
-        print("[スタッキング] メタ学習器 (LogisticRegression) 訓練中...")
-        print("=" * 50)
+        # ── diversity診断 ─────────────────────────────────────────────────────
         val_probs_list = [xgb_val_probs, cat_val_probs]
         test_probs_list = [xgb_test_probs, cat_test_probs]
+        model_agreement_analysis(test_probs_list, ["XGBoost", "CatBoost"])
+
+        # ── スタッキング ──────────────────────────────────────────────────────
+        print("=" * 50)
+        print("[スタッキング] メタ学習器 (LogisticRegression) 訓練中...")
+        print("=" * 50)
         meta_model = train_stacking(
             val_probs_list, y_val, meta_C=cfg["ensemble"].get("meta_C", 0.5)
         )
+        stack_acc, stack_pred = evaluate_ensemble(meta_model, test_probs_list, y_test, le_target)
 
-        # ── 評価 ──────────────────────────────────────────────────────────────
-        acc, y_pred = evaluate_ensemble(meta_model, test_probs_list, y_test, le_target)
+        # ── Temperature Scaling ───────────────────────────────────────────────
+        meta_val_proba = meta_model.predict_proba(np.hstack(val_probs_list))
+        temp_scaler = TemperatureScaler().fit(meta_val_proba, y_val)
+        meta_test_proba = meta_model.predict_proba(np.hstack(test_probs_list))
+        evaluate_temperature_scaled(temp_scaler, meta_test_proba, y_test, le_target)
+
+        # ── ブレンディング（Optuna重み最適化）────────────────────────────────
+        print("=" * 50)
+        print("[ブレンディング] Optuna で重みを最適化中...")
+        print("=" * 50)
+        blend_weights = train_blend_weights(val_probs_list, y_val, n_trials=cfg["ensemble"].get("blend_trials", 300))
+        blend_acc, blend_pred = evaluate_blend(blend_weights, test_probs_list, y_test, le_target)
+
+        # ── 精度サマリ ────────────────────────────────────────────────────────
+        best_acc = max(stack_acc, blend_acc)
+        y_pred = stack_pred if stack_acc >= blend_acc else blend_pred
+        acc = best_acc
         print(f"── 精度サマリ ──")
-        print(f"  XGBoost  単体 : {xgb_test_acc*100:.2f}%")
-        print(f"  CatBoost 単体 : {cat_test_acc*100:.2f}%")
-        print(f"  Ensemble Stack: {acc*100:.2f}%  (上乗せ: XGB {acc-xgb_test_acc:+.4f} / CAT {acc-cat_test_acc:+.4f})")
+        print(f"  XGBoost  単体    : {xgb_test_acc*100:.2f}%")
+        print(f"  CatBoost 単体    : {cat_test_acc*100:.2f}%")
+        print(f"  Ensemble Stack   : {stack_acc*100:.2f}%  ({stack_acc-xgb_test_acc:+.4f} vs XGB)")
+        print(f"  Blend (Optuna)   : {blend_acc*100:.2f}%  ({blend_acc-xgb_test_acc:+.4f} vs XGB)  ← 採用" if blend_acc >= stack_acc else f"  Blend (Optuna)   : {blend_acc*100:.2f}%  ({blend_acc-xgb_test_acc:+.4f} vs XGB)")
         print()
         count_subgroup_analysis(df_test, y_test, y_pred)
 
@@ -208,6 +296,7 @@ def main():
         joblib.dump(
             {
                 "meta_model": meta_model,
+                "temp_scaler": temp_scaler,
                 "xgb_model": xgb_model,
                 "cat_model": cat_model,
                 "le_target": le_target,

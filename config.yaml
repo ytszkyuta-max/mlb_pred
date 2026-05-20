@@ -99,3 +99,15 @@ catboost:
 ensemble:
   meta_C: 0.5        # メタ学習器の正則化強度 (小さいほど強正則化)
   model_name: "ensemble_stack.joblib"
+
+# ── TFT 設定 ──────────────────────────────────────────────────────────────────
+# --mode tft: Temporal Fusion Transformer (GRN + VSN + Multi-head Attention)
+tft:
+  d_model: 128       # 隠れ次元数 (hybrid の lstm_hidden と同じスケール)
+  num_heads: 4       # Multi-head attention のヘッド数 (d_model の約数)
+  num_lstm_layers: 2
+  dropout: 0.3
+  batch_size: 512
+  lr: 0.001
+  epochs: 30
+  model_name: "tft_pitch.pt"
