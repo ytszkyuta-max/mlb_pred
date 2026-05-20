@@ -113,16 +113,32 @@ Feature engineering
         ↓
     XGBoost ──────────────────────────┐
     CatBoost ─────────────────────────┤→ LogisticRegression → Final prediction
-    TFT v4 (GRN + VSN + MHA) ────────┘   (stacking)
+    TFT v4 ───────────────────────────┘   (stacking)
         ↓
     Temperature Scaling (probability calibration)
 ```
 
 **TFT v4** (`src/tft_model.py`):
-- Gated Residual Networks (GRN) for feature selection
-- Seq → LSTM with BOS token → Multi-head Self-Attention
-- Static covariate encoder for game context
-- d_model=128, dropout=0.2, CosineAnnealingWarmRestarts
+
+```
+Static features (count, runners, pitcher tendencies, ...)
+    └─ GRN → static_enc → 4 context vectors:
+              ├─ ctx_h / ctx_c  →  LSTM initial state (h₀, c₀)
+              ├─ ctx_e          →  enrichment context
+              └─ ctx_s          →  VSN conditioning
+
+Sequence features (previous pitches in the at-bat)
+    └─ VSN (ctx_s conditioned) → [BOS] + LSTM (h₀/c₀) → Enrichment GRN (ctx_e)
+                                      → Multi-head Self-Attention → FF GRN
+                                                 ↓
+                                    repr at last valid position
+                                         + static_skip(static_enc)   ← direct path for first pitch
+                                                 ↓
+                                            Classifier
+```
+
+- d_model=128, num_heads=4, dropout=0.2
+- CosineAnnealingWarmRestarts (T_0=25, T_mult=2) + label smoothing=0.1
 
 ---
 

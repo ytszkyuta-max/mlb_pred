@@ -113,16 +113,32 @@ pybaseball（Statcast API）
         ↓
     XGBoost ─────────────────────┐
     CatBoost ────────────────────┤→ LogisticRegression → 最終予測
-    TFT v4（GRN + VSN + MHA）───┘   （スタッキング）
+    TFT v4 ──────────────────────┘   （スタッキング）
         ↓
     Temperature Scaling（確率較正）
 ```
 
-**TFT v4 構成** (`src/tft_model.py`):
-- Gated Residual Network（GRN）による特徴量選択
-- Seq → BOS付きLSTM → Multi-head Self-Attention
-- Static covariate encoder で試合状況を文脈化
-- d_model=128, dropout=0.2, CosineAnnealingWarmRestarts
+**TFT v4 内部構造** (`src/tft_model.py`):
+
+```
+静的特徴量（カウント・ランナー・投手傾向など）
+    └─ GRN → static_enc → 4つのコンテキストベクトルに分岐:
+              ├─ ctx_h / ctx_c  →  LSTM 初期状態（h₀, c₀）
+              ├─ ctx_e          →  エンリッチメント文脈
+              └─ ctx_s          →  VSN への条件付け
+
+系列特徴量（打席内の直前投球履歴）
+    └─ VSN（ctx_s で条件付け）→ [BOS] + LSTM（h₀/c₀）→ Enrichment GRN（ctx_e）
+                                      → Multi-head Self-Attention → FF GRN
+                                                  ↓
+                                      最終有効位置の表現ベクトル
+                                          + static_skip（静的直接経路）← 初球など履歴ゼロの場面に有効
+                                                  ↓
+                                              Classifier
+```
+
+- d_model=128, num_heads=4, dropout=0.2
+- CosineAnnealingWarmRestarts（T_0=25, T_mult=2）+ label_smoothing=0.1
 
 ---
 
